@@ -1,0 +1,6 @@
+lark-oapi>=1.4.0
+python-dotenv>=1.0.0
+strands-agents>=1.0.0
+strands-agents-bedrock>=0.0.1
+fastapi>=0.115.0
+uvicorn>=0.30.0

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TagMate</title>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #0f1117;
+  color: #e0e0e0;
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 40px 24px;
+}
+
+.header {
+  margin-bottom: 32px;
+}
+
+.header h1 {
+  font-size: 20px;
+  font-weight: 600;
+  color: #f0f0f0;
+  letter-spacing: -0.3px;
+}
+
+.header p {
+  font-size: 13px;
+  color: #888;
+  margin-top: 4px;
+}
+
+/* Bridge 卡片 */
+.bridge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bridge-card {
+  background: #1a1d27;
+  border: 1px solid #2a2d3a;
+  border-radius: 10px;
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  transition: border-color 0.2s;
+}
+
+.bridge-card:hover {
+  border-color: #3a3d4a;
+}
+
+.bridge-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.bridge-icon.feishu { background: #1a73e8; }
+.bridge-icon.slack { background: #611f69; }
+.bridge-icon.discord { background: #5865f2; }
+.bridge-icon.default { background: #333; }
+
+.bridge-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.bridge-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: #f0f0f0;
+}
+
+.bridge-meta {
+  font-size: 12px;
+  color: #777;
+  margin-top: 2px;
+}
+
+.bridge-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.bridge-stat {
+  font-size: 12px;
+  color: #888;
+  text-align: right;
+}
+
+.bridge-stat .num {
+  font-size: 16px;
+  font-weight: 600;
+  color: #e0e0e0;
+  display: block;
+}
+
+/* 状态指示器 */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.connected {
+  background: #22c55e;
+  box-shadow: 0 0 6px #22c55e88;
+}
+
+.status-dot.connecting {
+  background: #eab308;
+  box-shadow: 0 0 6px #eab30888;
+  animation: pulse 1.5s infinite;
+}
+
+.status-dot.disconnected { background: #555; }
+
+.status-dot.error {
+  background: #ef4444;
+  box-shadow: 0 0 6px #ef444488;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* 空状态 */
+.empty {
+  text-align: center;
+  padding: 60px 0;
+  color: #555;
+  font-size: 14px;
+}
+
+/* 底部状态栏 */
+.footer {
+  margin-top: 40px;
+  padding-top: 16px;
+  border-top: 1px solid #1f222e;
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #555;
+}
+</style>
+</head>
+
+<body>
+<div id="app">
+  <div class="app">
+    <div class="header">
+      <h1>TagMate</h1>
+      <p>Bridge 连接管理</p>
+    </div>
+
+    <div v-if="bridges.length" class="bridge-list">
+      <div v-for="b in bridges" :key="b.name" class="bridge-card">
+        <div :class="['bridge-icon', b.type]">
+          {{ icons[b.type] || '🔗' }}
+        </div>
+        <div class="bridge-body">
+          <div class="bridge-name">{{ b.name }}</div>
+          <div class="bridge-meta">
+            {{ b.type }} · {{ statusLabel[b.status] || b.status }}
+            <template v-if="b.connected_at"> · 连接于 {{ fmtTime(b.connected_at) }}</template>
+            <template v-if="b.last_error"> · {{ b.last_error }}</template>
+          </div>
+        </div>
+        <div class="bridge-right">
+          <div class="bridge-stat">
+            <span class="num">{{ b.message_count }}</span>
+            messages
+          </div>
+          <div :class="['status-dot', b.status]"></div>
+        </div>
+      </div>
+    </div>
+
+    <div v-else class="empty">
+      没有活跃的 bridge
+    </div>
+
+    <div class="footer">
+      <span>{{ bridges.length }} bridge(s)</span>
+      <span>每 3s 刷新</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const { createApp, ref, onMounted, onUnmounted } = Vue
+
+createApp({
+  setup() {
+    const bridges = ref([])
+    const icons = { feishu: '🐦', slack: '💬', discord: '🎮' }
+    const statusLabel = {
+      connected: '已连接',
+      connecting: '连接中',
+      disconnected: '未连接',
+      error: '错误',
+    }
+
+    let timer = null
+
+    async function fetchBridges() {
+      try {
+        const resp = await fetch('/api/bridges')
+        bridges.value = await resp.json()
+      } catch (e) {
+        console.error('fetch failed', e)
+      }
+    }
+
+    function fmtTime(iso) {
+      if (!iso) return ''
+      const d = new Date(iso)
+      return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+    }
+
+    onMounted(() => {
+      fetchBridges()
+      timer = setInterval(fetchBridges, 3000)
+    })
+
+    onUnmounted(() => {
+      if (timer) clearInterval(timer)
+    })
+
+    return { bridges, icons, statusLabel, fmtTime }
+  }
+}).mount('#app')
+</script>
+</body>
+</html>
