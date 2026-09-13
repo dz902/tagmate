@@ -1,242 +1,269 @@
-# TagMate — 通用版 Claude Tag on AgentCore
+# TagMate 设计
 
-## 目标
+## 1. 产品定位
 
-做一个类似 Claude Tag 的产品：在团队协作平台（Slack/Discord/Teams/飞书/...）中 @agent，
-agent 后台工作，thread 回复结果。不锁定底层模型，不锁定 Slack。
+让普通人在管理面自助创建团队/公司级 agent，绑定到飞书、Slack 等平台的机器人，用户在平台里 @ 机器人触发。
 
-使用 AWS Bedrock AgentCore 作为 infra 底座。
+两个关键性质：
 
----
+- agent 是 by-user 的：agent 带着调用者的身份去取数据。同一个 agent，A 问它只能看到 A 有权限看的文档，B 问它看到的是 B 的。
+- 群里带群上下文：在群里 @ 时，agent 知道自己在哪个群、这轮对话之前群里说了什么，回复全群可见。
 
-## Claude Tag 核心能力拆解
+交互形态沿用 Claude Tag：@ 后 agent 后台执行，在 thread / 原消息下回复结果。
 
-| # | 能力 | 描述 |
-|---|------|------|
-| 1 | **Channel-scoped Agent** | 一个 channel 一个 agent 实例，所有人共享（multiplayer） |
-| 2 | **Scoped Memory** | memory 按 channel 隔离。public → workspace 共享，private → channel only |
-| 3 | **Memory 三来源** | 用户显式告知、agent 自动保存、agent 读历史 |
-| 4 | **Proactivity / Routines** | cron 定时任务、watch channel、subscribe PR、ambient 主动通知 |
-| 5 | **Agent Identity / Scopes** | admin 定义 scope（channel 组 + tools + connections），scope 间完全隔离 |
-| 6 | **Async Execution** | tag 后 agent 后台跑，完成后 thread 回复 |
-| 7 | **Connections / Tools** | GitHub/Jira/Slack/Datadog 等外部工具，scope 级权限控制 |
-| 8 | **Admin Controls** | token 预算（org + channel）、审计日志、memory CRUD |
+### Claude Tag 能力拆解（参考）
 
----
+| # | 能力 | 描述 | TagMate 取舍 |
+|---|------|------|-------------|
+| 1 | Channel-scoped Agent | 一个 channel 一个 agent 实例，所有人共享 | 改为 agent 是一等实体，channel 只是 session 维度之一 |
+| 2 | Scoped Memory | memory 按 channel 隔离 | 保留：群 session 按 chat_id 隔离，DM 按 principal 隔离 |
+| 3 | Memory 三来源 | 用户显式告知、agent 自动保存、agent 读历史 | 后续 |
+| 4 | Proactivity / Routines | cron、watch channel、subscribe PR | 后续 |
+| 5 | Agent Identity / Scopes | admin 定义 scope（channel 组 + tools + connections） | 改为 per-user 身份：工具用调用者凭证，而不是 scope 级共享凭证 |
+| 6 | Async Execution | tag 后后台跑，thread 回复 | 保留 |
+| 7 | Connections / Tools | 外部工具，scope 级权限 | 保留，但凭证粒度是 (principal, connection) |
+| 8 | Admin Controls | token 预算、审计日志、memory CRUD | MVP 只做 invocation 日志 |
 
-## AgentCore 能力映射
-
-### 直接可用（配置即用）
-
-| Tag 能力 | AgentCore 服务 | 用法 |
-|----------|--------------|------|
-| Agent loop / orchestration | **Harness**（声明式）或 **Runtime**（自定义代码） | Harness: model + prompt + tools 声明；Runtime: 带框架代码部署 |
-| Tool connections | **Gateway** | 1-click integrations (Slack/Jira/Salesforce...)，支持 MCP/OpenAPI/Lambda |
-| Short-term memory | **Memory** (short-term) | session 内 turn-by-turn context |
-| Long-term memory | **Memory** (long-term) | 跨 session 自动提取 insights |
-| Code execution | **Code Interpreter** | 隔离沙箱执行代码 |
-| Web browsing | **Browser** | 托管浏览器环境 |
-| Observability / Tracing | **Observability** | OpenTelemetry trace, unified dashboard |
-| Agent auth / credential | **Identity** | workload identity + OAuth credential exchange |
-| Tool access policy | **Policy** | Cedar 语言细粒度规则 |
-
-### 需要自建的层
-
-| Tag 能力 | 自建组件 | 复杂度 | 说明 |
-|----------|---------|--------|------|
-| Channel Adapter | `ChannelAdapter` | **中** | Slack/Discord/Teams/飞书的 webhook/event 接收 + 消息发送。每个平台一个 adapter |
-| Scope Manager | `ScopeManager` | **中** | admin 定义 scope（channel 组 → harness/memory store/tools 绑定），scope 间隔离 |
-| Multiplayer Session | `SessionRouter` | **中** | 同一 channel 的多人消息 → 同一个 agent session。需要并发控制 |
-| Proactivity / Scheduler | `SchedulerService` | **高** | 解析自然语言定义的 routine → cron expression → EventBridge 触发 → agent 执行 |
-| Memory Scope Bridge | `MemoryScopeBridge` | **低** | channel → AgentCore Memory store 的映射。public channel → shared store，private → isolated store |
-| Budget Controller | `BudgetController` | **低** | token/cost 计数 + 限额检查。per-org + per-scope + per-channel |
-| Admin API | `AdminService` | **中** | scope CRUD、memory 管理、budget 配置、审计日志查询 |
+与 Claude Tag 最大的差别在 5：Tag 的工具凭证是 scope 级（一个 channel 里所有人共享同一个 GitHub 连接），TagMate 是用户级。这是"普通人建公司级 agent"的前提：管理员不需要也不应该把自己的凭证借给全公司用。
 
 ---
 
-## 架构分层
+## 2. 核心实体
 
-```
-┌─────────────────────────────────────────────────┐
-│              Messaging Platforms                 │
-│  Slack  │  Discord  │  Teams  │  飞书  │  ...   │
-└────────────────────┬────────────────────────────┘
-                     │ webhooks / events
-                     ▼
-┌─────────────────────────────────────────────────┐
-│            Channel Adapter Layer                 │
-│  SlackAdapter │ DiscordAdapter │ FeishuAdapter   │
-│  - receive @mention events                      │
-│  - normalize to internal Message format          │
-│  - send replies back to thread                   │
-└────────────────────┬────────────────────────────┘
-                     │ internal Message
-                     ▼
-┌─────────────────────────────────────────────────┐
-│              Core Application Layer              │
-│                                                  │
-│  ┌──────────────┐  ┌──────────────────────────┐ │
-│  │ ScopeManager │  │ SessionRouter            │ │
-│  │ - scope CRUD │  │ - channel → session map  │ │
-│  │ - tools bind │  │ - multiplayer routing    │ │
-│  │ - memory bind│  │ - concurrency control    │ │
-│  └──────────────┘  └──────────────────────────┘ │
-│                                                  │
-│  ┌──────────────┐  ┌──────────────────────────┐ │
-│  │ Scheduler    │  │ BudgetController         │ │
-│  │ - routines   │  │ - token counting         │ │
-│  │ - cron jobs  │  │ - spend limits           │ │
-│  │ - PR watch   │  │ - per-scope / per-org    │ │
-│  └──────────────┘  └──────────────────────────┘ │
-│                                                  │
-│  ┌──────────────────────────────────────────┐   │
-│  │ AdminService                              │   │
-│  │ - scope management UI/API                 │   │
-│  │ - memory management                       │   │
-│  │ - audit log                               │   │
-│  └──────────────────────────────────────────┘   │
-└────────────────────┬────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────┐
-│         AWS Bedrock AgentCore (infra)            │
-│                                                  │
-│  Harness/Runtime │ Memory │ Gateway │ Identity   │
-│  Code Interpreter│Browser │ Policy  │ Observ.    │
-│                                                  │
-│  - agent loop (model-agnostic)                   │
-│  - scoped memory stores                          │
-│  - MCP tool gateway with auth                    │
-│  - workload identity + OAuth                     │
-│  - sandbox (code/browser)                        │
-│  - tracing + evaluation                          │
-└─────────────────────────────────────────────────┘
-```
+### Agent 定义
 
----
+管理面创建。字段：
 
-## 关键设计决策
+| 字段 | 说明 |
+|------|------|
+| id, name | 标识 |
+| instructions | system prompt |
+| model | Bedrock model id |
+| connections | 允许使用的 connection 列表（如 `feishu`），决定哪些用户身份工具可注册 |
+| tools | 允许使用的工具名列表 |
+| memory_policy | 记忆策略：MVP 只有 session 内短期记忆，字段先占位 |
 
-### 1. Harness vs Runtime
+### Binding
 
-**推荐：先用 Harness，后期按需切 Runtime**
+agent 与平台机器人的绑定。一个 agent 可以绑多个 bot（比如同时挂到飞书和 Slack，或两个飞书应用）。
 
-- Harness = 声明式，零代码。model + prompt + tools 声明即可，AgentCore 管 loop。
-  适合 MVP：快速验证 Tag 模式是否 work。
-- Runtime = 自定义代码部署（Strands/LangGraph/自研框架）。
-  当 Harness 不够灵活时再切——比如需要自定义 tool 选择逻辑、multi-agent 编排等。
-- Harness 可以 export 成 Strands 代码 → 无缝迁移到 Runtime。
+| 字段 | 说明 |
+|------|------|
+| agent_id | 所属 agent |
+| platform | `feishu` / `slack` |
+| credentials | 飞书：app_id / app_secret；Slack：bot token / signing secret |
+| status | 连接状态 |
 
-### 2. Memory 拓扑
+bridge 进程按 binding 启动：每个 binding 一个飞书 WebSocket 长连接（或一个 Slack Socket Mode 连接）。
 
-Claude Tag 的 memory 拓扑：
-- workspace store（public channels 共享读写）
-- channel store（private channel 独有）
-- DM store（per-person 私有）
+### Principal
 
-映射到 AgentCore Memory：
-- 一个 workspace = 一个 shared memory store（namespace: `ws:{workspace_id}`）
-- 一个 private channel = 一个 isolated memory store（namespace: `ch:{channel_id}`）
-- 一个 DM = 一个 user memory store（namespace: `dm:{user_id}`）
-- agent 读取时：public context → 查 ws store；private context → 查 ch store + ws store (readonly)
+`(platform, user_id)`。飞书用 open_id（应用内稳定，跨应用不同）。
 
-### 3. Channel Adapter 接口
+MVP 不做跨平台身份合并：同一个人在飞书和 Slack 是两个 principal，各自有各自的 credentials。
 
-```python
-class ChannelAdapter(ABC):
-    """Messaging platform adapter — 一个平台一个实现"""
+### Credentials
 
-    @abstractmethod
-    async def start(self):
-        """启动 webhook listener / WebSocket 连接"""
+`(principal, connection) -> access_token, refresh_token, expires_at, refresh_expires_at, scopes`。
 
-    @abstractmethod
-    async def on_mention(self, event: MentionEvent) -> None:
-        """收到 @agent mention 时调用"""
+per-user OAuth 授权得到的凭证。MVP 第一个 connection 就是飞书自身：用飞书的 user_access_token 以用户身份读飞书文档、日历、消息。
 
-    @abstractmethod
-    async def send_reply(self, channel_id: str, thread_id: str, content: str) -> None:
-        """向 channel thread 发送回复"""
+### Invocation context
 
-    @abstractmethod
-    async def get_channel_info(self, channel_id: str) -> ChannelInfo:
-        """获取 channel 元信息（public/private、name 等）"""
-
-    @abstractmethod
-    async def get_channel_history(self, channel_id: str, limit: int) -> list[Message]:
-        """获取 channel 历史消息（用于 agent 自主学习 context）"""
-```
-
-### 4. Scope 模型
+每条消息由 bridge 组装，穿透到 agent 层：
 
 ```python
 @dataclass
-class Scope:
-    id: str
-    name: str                          # e.g. "engineering", "sales-support"
-    channels: list[str]                # channel IDs assigned to this scope
-    harness_id: str                    # AgentCore Harness ID (model + prompt + tools)
-    memory_stores: dict[str, str]      # channel_id → memory_store_id mapping
-    shared_memory_store: str           # workspace-level shared store ID
-    gateway_id: str                    # AgentCore Gateway endpoint
-    tools: list[str]                   # allowed tool names
-    budget: Budget                     # token/cost limits
-    routines: list[Routine]            # scheduled jobs
+class InvocationContext:
+    agent_id: str
+    binding_id: str
+    principal: Principal          # 发言人
+    scene: Literal["dm", "group", "thread"]
+    chat_id: str
+    message_id: str               # 回复锚点
+    thread_id: str | None
+    session_key: str              # 见下
 ```
 
-### 5. Proactivity / Scheduler
+现有代码 `agent(user_text)` 只传文本，这是要改的根：agent 层必须知道"谁在问、在哪问"，才能选凭证、选 session、决定注册哪些工具。
 
-MVP 方案：
-- 用户在 channel 中用自然语言描述 routine
-- Agent 解析为结构化 routine spec（schedule + action + output channel）
-- 持久化到 DB
-- 一个 poller/scheduler 进程定期检查到期的 routine → 调 Harness invoke
-- 结果通过 ChannelAdapter.send_reply 投递回 channel
+### Session key
 
-后期可迁移到 EventBridge Scheduler，但 MVP 不需要。
+| 场景 | session key | 说明 |
+|------|-------------|------|
+| DM | `(agent_id, principal)` | 一个人和一个 agent 的私聊是一条连续对话 |
+| 群 | `(agent_id, chat_id)` | 群内多人共享一条对话，agent 能看到之前别人问了什么 |
+| thread | `(agent_id, chat_id, thread_id)` | 有 thread 时按 thread 隔离，避免群内多话题互相污染 |
 
----
-
-## 实现优先级
-
-### Phase 1: MVP — 能用 (2-3 weeks)
-
-目标：Slack 中 @agent，后台执行，thread 回复。有基础 memory。
-
-1. **SlackAdapter** — Slack Events API 接收 @mention，reply 到 thread
-2. **SessionRouter** — channel → Harness session 映射，multiplayer 路由
-3. **Harness 集成** — 声明式创建 agent（model + prompt + tools）
-4. **Memory 集成** — 一个 shared memory store，所有 channel 共用（简化版）
-5. **Gateway 集成** — 配几个基础 tools（GitHub、web search）
-
-### Phase 2: Scoping + Memory 隔离 (1-2 weeks)
-
-6. **ScopeManager** — admin 定义 scope，channel→scope 绑定
-7. **MemoryScopeBridge** — channel 级 memory 隔离
-8. **BudgetController** — 基础 token 计数 + 限额
-
-### Phase 3: Proactivity (2-3 weeks)
-
-9. **Scheduler** — routine 解析 + 定时执行
-10. **Channel watch** — 监听其他 channel 消息
-11. **PR subscription** — GitHub webhook → agent 响应
-
-### Phase 4: Multi-platform + Admin (2+ weeks)
-
-12. **DiscordAdapter / FeishuAdapter** — 更多平台接入
-13. **Admin Dashboard** — scope 管理、memory 管理、审计日志
-14. **Optimization** — AgentCore Evaluations + A/B testing
+session 持有对话历史（Strands 的 messages），按 session key 存取。
 
 ---
 
-## 技术选择
+## 3. 身份与凭证流程（飞书）
 
-| 组件 | 选择 | 理由 |
+以下是核实过的飞书事实，每条带文档 URL。
+
+### 事件里没有用户凭证
+
+机器人事件 `im.message.receive_v1` 的 payload 只含 sender 的 open_id / union_id / user_id，没有任何用户凭证。`header.token` 是事件订阅的 Verification Token，用于校验事件来源，与用户无关。
+https://open.feishu.cn/document/server-docs/im-v1/message/events/receive
+
+结论：光靠机器人收消息，只能知道"是谁"，不能"以他的身份"做任何事。用户身份操作必须走 OAuth。
+
+### OAuth 授权码
+
+授权页：`GET https://accounts.feishu.cn/open-apis/authen/v1/authorize`
+
+参数：`client_id`、`response_type=code`、`redirect_uri`（必须在开发者后台登记）、`scope`（空格分隔）、`state`。
+
+code 有效期 5 分钟，一次性。
+https://open.feishu.cn/document/authentication-management/access-token/obtain-oauth-code
+
+### 换 token（v3）
+
+`POST https://accounts.feishu.cn/oauth/v3/token`，`application/x-www-form-urlencoded`
+
+参数：`grant_type=authorization_code`、`client_id`、`client_secret`、`code`、`redirect_uri`。
+
+v2 接口已 deprecated，不要用。
+https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/authentication-management/access-token/get-user-access-token-v3
+
+### 刷新
+
+同一端点，`grant_type=refresh_token`。前提：后台开通 `offline_access` 权限，且授权时 scope 里带上它，否则响应里没有 refresh_token。
+
+refresh_token 一次性：用过之后旧的失效，必须用响应里的新 refresh_token 覆盖存储。
+https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/authentication-management/access-token/refresh-user-access-token-v3
+
+### 有效期
+
+- access_token：`expires_in`，文档示例 7200s
+- refresh_token：`refresh_token_expires_in`，文档示例 604800s
+- 文档强调以响应为准，不要硬编码
+- 用户授权后 365 天是硬上限，到期必须重新走授权
+
+### 授权确认体验
+
+- 飞书客户端内打开授权链接：免登，且可以直接跳转免确认页
+- PC 端点击聊天中的链接：会跳系统浏览器，需要扫码或密码登录，再看授权页
+- 没有"管理员开通即用户免确认"的机制，每个用户至少要过一次授权
+- 增量授权只展示新增的 scope
+
+https://open.feishu.cn/document/client-docs/build-login-free-system-
+
+### scope
+
+| 用途 | scope | 备注 |
+|------|-------|------|
+| 读 docx | `docx:document:readonly` | |
+| 读日历 | `calendar:calendar:readonly` | |
+| 搜消息 | `search:message` | 仅 user_access_token 可用 |
+| 刷新 token | `offline_access` | |
+
+scope 是 API 门槛，不等于数据权限：拿到 `docx:document:readonly` 也只能读该用户本来有权限的文档，文档级共享权限由飞书另判。这正是 by-user 模型想要的。
+https://open.feishu.cn/document/server-docs/application-scope/scope-list
+
+### 首次使用流程
+
+```
+用户 @agent "帮我总结这篇文档 <url>"
+  -> bridge 组装 InvocationContext，调 agent
+  -> agent 选择 read_feishu_doc 工具
+  -> 工具查 credentials(principal, "feishu")，无 token
+  -> 抛 NeedAuthorization(connection="feishu", scopes=[...])
+  -> bridge 回一张授权卡片，链接为授权页 URL，state 绑定 principal + 待重跑的 invocation
+  -> 用户点击授权
+  -> 飞书回调 GET /oauth/feishu/callback?code=...&state=...
+  -> 服务端校验 state，换 token，写 credentials
+  -> 重跑原 invocation，工具拿到 token，正常返回
+```
+
+redirect_uri 必须是公网可达且已登记的地址。本地开发用隧道（cloudflared / ngrok），并把隧道地址登记到开发者后台。
+
+---
+
+## 4. 群场景策略
+
+- principal 仍是发言人：群里 A @agent 读文档，用的是 A 的凭证（但见第 5 节，MVP 群里不开放用户凭证工具）
+- 记忆 / 上下文 scope 是该群：session key 按 chat_id，agent 能看到群里之前的对话
+- prompt 中声明"你的输出全群可见"，让模型知道不该把私人信息贴出来。这是提示，不是防护，防护见下一节
+
+---
+
+## 5. 安全
+
+原则：LLM 只决定意图，权限由代码决定。不靠 prompt 做访问控制。
+
+### MVP 三条硬防护（代码层）
+
+1. 只申请只读 scope。agent 拿不到写权限，最坏结果是读到不该读的东西，不会造成不可逆修改。
+2. 群场景下，需要用户凭证的工具不注册给 LLM。群里 @agent，工具列表里就没有 `read_feishu_doc`，模型无从调用，也就不存在"A 的私人文档被贴到群里"的路径。判断依据是 `InvocationContext.scene`，在构造 Agent 时过滤工具列表。
+3. 写操作一律审批卡片。MVP 没有写工具，自动满足；后续加写工具时，工具执行前必须经用户点卡片确认。
+
+### 后续可选
+
+- 污点标记：用用户凭证取回的数据打标，禁止出现在群输出中。这样可以在群里开放用户凭证工具，同时不泄漏
+- 审计日志：每次工具调用记录用了谁的凭证、访问了什么资源
+
+### prompt injection
+
+文档内容、群消息都是不可信输入，可能包含指令注入。没有根治方法，策略是限制爆破半径：只读 scope、群里不带用户凭证、写操作人工确认。上面三条硬防护就是为此设计的。
+
+---
+
+## 6. 管理面（MVP）
+
+只做三件事：
+
+1. 建 agent：填 name、instructions、model、勾选 connections / tools
+2. 绑 bot：给 agent 添加 binding，填平台凭证，看连接状态
+3. 看 invocation 日志：session -> turn -> step -> tool call，每个 tool call 标明用了谁的身份（principal）
+
+不做 web 聊天。web 端的身份和平台身份不一致（web 上没有 open_id），一旦提供 web 聊天就会引入"匿名 principal"污染 by-user 模型。要测 agent 就去飞书里 @ 它。
+
+暂无 auth，开发阶段。
+
+前端视觉和组件模式参考 mangent（`/Users/zhangdai/Code/mangent/frontend`，Vue）。
+
+---
+
+## 7. 技术选型
+
+| 组件 | 选择 | 说明 |
 |------|------|------|
-| 语言 | Python 3.12+ | AgentCore SDK 原生支持，async 生态成熟 |
-| Web 框架 | FastAPI | Slack Events API webhook + Admin API |
-| AgentCore SDK | `boto3` bedrock-agentcore | 官方 SDK |
-| Slack SDK | `slack-bolt` | 官方 Python SDK，支持 Events API + Socket Mode |
-| 数据库 | DynamoDB 或 SQLite | Scope/Routine 元数据。MVP 可用 SQLite，生产用 DynamoDB |
-| Scheduler | 内置 poller (MVP) → EventBridge (prod) | 渐进式 |
-| 部署 | Lambda + API Gateway 或 ECS | Lambda 适合 webhook 接收；ECS 适合长时运行的 agent session |
+| agent 底座 | Strands + Bedrock | 现有 agent.py 已用；Agent 按 invocation 构造（model + instructions + 过滤后的 tools + session messages） |
+| 存储 | SQLite | 表：agents, bindings, principals, credentials, sessions, invocations, events |
+| 飞书接入 | lark-oapi WebSocket 长连接 | 现有 bridges/feishu.py，不需要公网 webhook |
+| Web 框架 | FastAPI | 管理面 API、OAuth 回调、静态前端 |
+| 前端 | Vue | 参考 mangent |
+
+### AgentCore（后续可选）
+
+AgentCore 的 Identity（OAuth credential 托管）、Memory（长期记忆）、Gateway（工具连接）、Observability 都能对应上 TagMate 的需求，但 MVP 不接：
+
+- Identity 对应 credentials 表，MVP 自己存 SQLite 够用，等 connection 多了再考虑托管
+- Memory 对应 sessions 表 + 后续长期记忆
+- Gateway 对应 connections，MVP 只有飞书一个 connection，直接调 lark-oapi
+
+存储层做成接口，后续可替换。
+
+---
+
+## 8. 现状与差距
+
+现状（agent.py + bridges/feishu.py + main.py）：
+
+- 单个 FeishuBridge，凭证从环境变量读，只能挂一个飞书应用
+- 全局一个 Strands Agent 实例，`agent(user_text)` 只传文本
+- 没有 session：每条消息都是独立对话，群和 DM 不区分
+- 没有身份：不知道谁在问，也没有任何用户凭证
+- 没有存储
+- 已有：WebSocket 收消息、去重、"思考中"卡片 + 完成后更新、纯文本兜底
+
+### MVP 实现顺序
+
+1. 存储与实体：SQLite schema，agents / bindings / principals / credentials / sessions / invocations / events 的读写
+2. invocation context 穿透到 agent：bridge 组装 InvocationContext，按 session key 取历史，按 agent 定义 + scene 构造 Agent，记录 invocation / events
+3. OAuth 回调与 credentials：授权页 URL 生成、state 管理、`/oauth/feishu/callback`、换 token、刷新、NeedAuthorization -> 授权卡片 -> 重跑
+4. 首个用户身份工具：`read_feishu_doc`，用 (principal, feishu) 的 user_access_token 读 docx，只在 DM 场景注册
+5. 管理面：建 agent、绑 bot、看 invocation 日志

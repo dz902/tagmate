@@ -13,48 +13,30 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import bridges
-from bridges.feishu import FeishuBridge
+import store
+from api import router as api_router
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动所有 bridges
-    if os.environ.get("APP_ID"):
-        feishu = FeishuBridge()
-        bridges.register(feishu)
-        feishu.start()
-        print("[tagmate] feishu bridge started")
-
+    store.init_db()
+    infos = bridges.start_all_enabled()
+    print(f"[tagmate] started {len(infos)} bridge(s)")
     yield
-    # shutdown: 停止所有 bridges
-    for info in bridges.get_all():
-        b = bridges.get(info.name)
-        if b:
-            b.stop()
+    bridges.stop_all()
 
 
 app = FastAPI(title="TagMate", lifespan=lifespan)
+app.include_router(api_router)
 
 
-# --- API ---
+# --- 前端（frontend/ 经 vite build 产出到 static/）---
 
-
-@app.get("/api/bridges")
-def list_bridges():
-    return [info.to_dict() for info in bridges.get_all()]
-
-
-@app.get("/api/status")
-def status():
-    return {"status": "ok", "bridges": len(bridges.get_all())}
-
-
-# --- 前端 ---
-
-if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+ASSETS_DIR = STATIC_DIR / "assets"
+if ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 
 @app.get("/")
