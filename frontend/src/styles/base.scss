@@ -419,3 +419,31 @@ pre.json-block {
 .mono { font-family: var(--font-mono); font-size: var(--font-xs); }
 .error-text { color: var(--danger); }
 
+/* --- Bot identity (binding tables) --- */
+.bot-avatar {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    vertical-align: middle;
+}
+
+.bot-identity {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.col-bot {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.bot-sub {
+    font-size: var(--font-xxs);
+    font-family: var(--font-mono);
+    line-height: 1.3;
+}
+

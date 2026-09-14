@@ -20,6 +20,8 @@ from datetime import datetime
 
 import lark_oapi as lark
 import lark_oapi.ws.client as _lark_ws
+from lark_oapi.core.enum import HttpMethod, AccessTokenType
+from lark_oapi.core.model import BaseRequest, BaseResponse
 from lark_oapi.api.cardkit.v1 import (
     Card,
     CreateCardRequest,
@@ -36,6 +38,7 @@ from lark_oapi.api.im.v1 import (
 )
 
 import runtime
+import store
 from bridges import Bridge, BridgeStatus
 from context import Principal, Scene, build_context
 
@@ -81,12 +84,22 @@ def ws_loop_thread() -> threading.Thread | None:
 
 
 def _acquire_loop() -> asyncio.AbstractEventLoop:
-    """引用计数 +1；首个使用者把 lark 模块级 loop 放到专用线程 run_forever。"""
+    """引用计数 +1；首个使用者把 lark 模块级 loop 放到专用线程 run_forever。
+
+    lark 在 import 时用 ``asyncio.get_event_loop()`` 取 loop：若 import 发生在某个运行中的 loop
+    里（如 FastAPI lifespan 内 lazy import），拿到的就是宿主（uvicorn）的 loop。此时必须换成
+    自己的，否则 run_forever 失败、协程被调度到宿主 loop、shutdown 时 stop() 自等死锁。
+    lark 各函数按名字引用模块全局 ``loop``，重新赋值模块属性即可生效。
+    """
     global _loop_thread, _loop_users
     with _loop_lock:
         _loop_users += 1
         if _loop_thread is None:
-            t = threading.Thread(target=_lark_ws.loop.run_forever, daemon=True, name="feishu-ws-loop")
+            loop = _lark_ws.loop
+            if loop.is_running() or loop.is_closed():
+                loop = asyncio.new_event_loop()
+                _lark_ws.loop = loop
+            t = threading.Thread(target=loop.run_forever, daemon=True, name="feishu-ws-loop")
             t.start()
             _loop_thread = t
     return _lark_ws.loop
@@ -192,7 +205,60 @@ class FeishuBridge(Bridge):
             await ws._reconnect()
         self.info.status = BridgeStatus.CONNECTED
         self.info.connected_at = datetime.now()
+        # 拉取机器人/企业元信息（不影响连接状态）
+        try:
+            meta = await asyncio.to_thread(self._fetch_meta)
+            store.update_binding(self.info.binding_id, meta=meta)
+            self.info.bot_name = meta.get("bot_name")
+            self.info.tenant_name = meta.get("tenant_name")
+        except Exception as e:
+            print(f"[feishu:{self.info.binding_id}] fetch meta failed: {e!r}")
         await ws._ping_loop()
+
+    def _fetch_meta(self) -> dict:
+        """同步拉取机器人信息和企业信息，返回 meta dict。单个接口失败只 log，对应字段 None。"""
+        meta: dict = {}
+
+        # --- 机器人信息（GET /open-apis/bot/v3/info，SDK 无 v3 封装，用通用 request）---
+        try:
+            req = (
+                BaseRequest.builder()
+                .http_method(HttpMethod.GET)
+                .uri("/open-apis/bot/v3/info")
+                .token_types({AccessTokenType.TENANT})
+                .build()
+            )
+            resp: BaseResponse = self._client.request(req)
+            if resp.success():
+                raw_data = json.loads(resp.raw.content)
+                bot = raw_data.get("bot", {})
+                meta["bot_name"] = bot.get("app_name")
+                meta["bot_open_id"] = bot.get("open_id")
+                meta["avatar_url"] = bot.get("avatar_url")
+            else:
+                print(f"[feishu:{self.info.binding_id}] bot/v3/info failed: {resp.code} {resp.msg}")
+        except Exception as e:
+            print(f"[feishu:{self.info.binding_id}] bot/v3/info error: {e!r}")
+
+        # --- 企业信息（SDK 封装：client.tenant.v2.tenant.query）---
+        try:
+            from lark_oapi.api.tenant.v2 import QueryTenantRequest
+            tenant_req = QueryTenantRequest.builder().build()
+            tenant_resp = self._client.tenant.v2.tenant.query(tenant_req)
+            if tenant_resp.success():
+                t = tenant_resp.data.tenant
+                meta["tenant_name"] = t.name
+                meta["tenant_key"] = t.tenant_key
+            else:
+                print(f"[feishu:{self.info.binding_id}] tenant query failed: {tenant_resp.code} {tenant_resp.msg}")
+                # 99991672 缺 scope：飞书在 msg 里附带开通链接，透给管理面让用户自己决定
+                m = re.search(r"https://open\.feishu\.cn/app/\S+", tenant_resp.msg or "")
+                if m:
+                    meta["tenant_auth_url"] = m.group(0).rstrip("，。,.")
+        except Exception as e:
+            print(f"[feishu:{self.info.binding_id}] tenant query error: {e!r}")
+
+        return meta
 
     async def _close_ws(self) -> None:
         # lark 用 loop.create_task 起的收消息 task 没有句柄可拿，关连接后它会以 ConnectionClosed

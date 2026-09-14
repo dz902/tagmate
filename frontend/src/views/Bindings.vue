@@ -14,6 +14,8 @@
                 <tr>
                     <th>Agent</th>
                     <th>平台</th>
+                    <th>机器人</th>
+                    <th>企业</th>
                     <th>App ID</th>
                     <th>状态</th>
                     <th>连接时间</th>
@@ -28,6 +30,17 @@
                         <RouterLink :to="`/agents/${b.agent_id}`">{{ agentName(b.agent_id) }}</RouterLink>
                     </td>
                     <td>{{ b.platform }}</td>
+                    <td>
+                        <span class="bot-identity">
+                            <img v-if="b.meta?.avatar_url" :src="b.meta.avatar_url" class="bot-avatar">
+                            <span>{{ b.meta?.bot_name || '\u2014' }}</span>
+                        </span>
+                    </td>
+                    <td>
+                        <template v-if="b.meta?.tenant_name">{{ b.meta.tenant_name }}</template>
+                        <a v-else-if="b.meta?.tenant_auth_url" :href="b.meta.tenant_auth_url" target="_blank" rel="noopener" title="应用缺少 tenant:tenant:readonly 权限，开通后重启 binding 即可显示企业名">开通权限</a>
+                        <template v-else>{{ '\u2014' }}</template>
+                    </td>
                     <td class="col-mono">{{ b.credentials.app_id }}</td>
                     <td><StatusDot :status="b.status" /></td>
                     <td class="col-muted">{{ fmtTime(b.connected_at) }}</td>

@@ -44,6 +44,22 @@ def test_binding_cascade_delete():
     assert store.list_bindings() == []
 
 
+def test_binding_meta_roundtrip():
+    a = store.create_agent("bot")
+    meta = {"bot_name": "TestBot", "tenant_key": "tk_123"}
+    b = store.create_binding(a["id"], "feishu", {}, meta=meta)
+    got = store.get_binding(b["id"])
+    assert got["meta"] == meta
+
+    # update meta
+    updated = store.update_binding(b["id"], meta={"bot_name": "NewBot"})
+    assert updated["meta"] == {"bot_name": "NewBot"}
+
+    # default meta is {}
+    b2 = store.create_binding(a["id"], "feishu", {})
+    assert store.get_binding(b2["id"])["meta"] == {}
+
+
 def test_binding_requires_agent():
     with pytest.raises(sqlite3.IntegrityError):
         store.create_binding("nope", "feishu", {})

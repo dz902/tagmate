@@ -30,6 +30,8 @@ class BridgeInfo:
     connected_at: datetime | None = None
     message_count: int = 0
     last_error: str | None = None
+    bot_name: str | None = None
+    tenant_name: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -41,6 +43,8 @@ class BridgeInfo:
             "connected_at": self.connected_at.isoformat() if self.connected_at else None,
             "message_count": self.message_count,
             "last_error": self.last_error,
+            "bot_name": self.bot_name,
+            "tenant_name": self.tenant_name,
         }
 
 

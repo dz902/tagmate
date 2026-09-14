@@ -85,11 +85,15 @@ def test_binding_masks_secrets(client, fake_bridges):
     assert b["credentials"] == {"app_id": "cli_1", "app_secret": "***", "access_token": "***"}
     assert b["status"] == "disconnected"
     assert b["enabled"] == 0
+    assert b["meta"] == {}
 
     lst = client.get("/api/bindings", params={"agent_id": a["id"]}).json()
     assert len(lst) == 1
     assert lst[0]["credentials"]["app_secret"] == "***"
-    assert client.get(f"/api/bindings/{b['id']}").json()["credentials"]["app_secret"] == "***"
+    assert lst[0]["meta"] == {}
+    detail = client.get(f"/api/bindings/{b['id']}").json()
+    assert detail["credentials"]["app_secret"] == "***"
+    assert detail["meta"] == {}
     # 库里仍是明文
     assert store.get_binding(b["id"])["credentials"]["app_secret"] == "s3cret"
 

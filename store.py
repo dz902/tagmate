@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS bindings (
     platform TEXT NOT NULL,
     credentials TEXT NOT NULL DEFAULT '{}',
     enabled INTEGER NOT NULL DEFAULT 1,
+    meta TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS principals (
@@ -94,7 +95,7 @@ CREATE INDEX IF NOT EXISTS idx_invocations_session ON invocations(session_id, st
 """
 
 # 进出库自动 dumps/loads 的列
-_JSON_COLS = {"connections", "tools", "credentials", "scopes", "messages", "payload"}
+_JSON_COLS = {"connections", "tools", "credentials", "scopes", "messages", "payload", "meta"}
 
 # append_event 的 seq 自增在 Python 侧做 read-then-write，用锁保证同进程内串行
 _event_lock = threading.Lock()
@@ -198,10 +199,11 @@ def delete_agent(id: str) -> None:
 
 # ---------- bindings ----------
 
-def create_binding(agent_id: str, platform: str, credentials: dict, enabled: bool = True) -> dict:
+def create_binding(agent_id: str, platform: str, credentials: dict, enabled: bool = True, meta: dict | None = None) -> dict:
     row = {
         "id": _new_id(), "agent_id": agent_id, "platform": platform,
-        "credentials": credentials, "enabled": int(enabled), "created_at": time.time(),
+        "credentials": credentials, "enabled": int(enabled),
+        "meta": meta or {}, "created_at": time.time(),
     }
     _insert("bindings", row)
     return row

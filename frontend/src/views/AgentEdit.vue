@@ -61,8 +61,7 @@
             <table v-else class="table" style="margin-bottom: 16px">
                 <thead>
                     <tr>
-                        <th>平台</th>
-                        <th>App ID</th>
+                        <th>机器人</th>
                         <th>状态</th>
                         <th class="col-num">消息数</th>
                         <th>最近错误</th>
@@ -72,8 +71,13 @@
                 </thead>
                 <tbody>
                     <tr v-for="b in bindings" :key="b.id">
-                        <td>{{ b.platform }}</td>
-                        <td class="col-mono">{{ b.credentials.app_id }}</td>
+                        <td class="col-bot">
+                            <span class="bot-identity">
+                                <img v-if="b.meta?.avatar_url" :src="b.meta.avatar_url" class="bot-avatar">
+                                <span>{{ b.meta?.bot_name || b.platform }}</span>
+                            </span>
+                            <span class="bot-sub muted">{{ b.credentials.app_id }}<template v-if="b.meta?.tenant_name"> · {{ b.meta.tenant_name }}</template><template v-else-if="b.meta?.tenant_auth_url"> · <a :href="b.meta.tenant_auth_url" target="_blank" rel="noopener" title="应用缺少 tenant:tenant:readonly 权限，开通后重启 binding 即可显示企业名">开通企业信息权限</a></template></span>
+                        </td>
                         <td><StatusDot :status="b.status" /></td>
                         <td class="col-num">{{ b.message_count }}</td>
                         <td class="col-error" :title="b.last_error || ''">{{ b.last_error || '-' }}</td>
