@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import base64
+import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 import bridges
 import runtime
 import store
+from feishu_tools import (
+    FEISHU_OAUTH_SCOPES,
+    decode_oauth_state,
+    exchange_code,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -242,3 +251,63 @@ def list_models():
 @router.get("/status")
 def status():
     return {"status": "ok", "bridges": len(bridges.get_all())}
+
+
+
+# ---------- OAuth callback ----------
+
+log = logging.getLogger(__name__)
+
+oauth_router = APIRouter()
+
+SUCCESS_HTML = """\
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>授权成功</title></head>
+<body style="font-family:sans-serif;text-align:center;margin-top:80px">
+<h2>✅ 授权成功</h2>
+<p>请回到飞书，重新发送消息即可使用。</p>
+</body></html>"""
+
+ERROR_HTML = """\
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>授权失败</title></head>
+<body style="font-family:sans-serif;text-align:center;margin-top:80px">
+<h2>❌ 授权失败</h2>
+<p>{detail}</p>
+</body></html>"""
+
+
+@oauth_router.get("/oauth/feishu/callback")
+def feishu_oauth_callback(code: str = "", state: str = ""):
+    if not code or not state:
+        return HTMLResponse(ERROR_HTML.format(detail="缺少 code 或 state 参数"), status_code=400)
+
+    try:
+        principal_id, binding_id = decode_oauth_state(state)
+    except Exception:
+        return HTMLResponse(ERROR_HTML.format(detail="state 参数无效"), status_code=400)
+
+    binding = store.get_binding(binding_id)
+    if binding is None:
+        return HTMLResponse(ERROR_HTML.format(detail="绑定不存在"), status_code=404)
+
+    creds = binding["credentials"]
+
+    try:
+        data = exchange_code(creds["app_id"], creds["app_secret"], code)
+    except Exception as exc:
+        log.error("feishu oauth exchange_code failed: %s", exc, exc_info=True)
+        return HTMLResponse(ERROR_HTML.format(detail=f"换取 token 失败: {exc}"), status_code=502)
+
+    now = time.time()
+    store.upsert_credentials(
+        principal_id=principal_id,
+        connection="feishu",
+        access_token=data["access_token"],
+        refresh_token=data.get("refresh_token"),
+        expires_at=now + data.get("expires_in", 7200),
+        refresh_expires_at=now + data.get("refresh_expires_in", 30 * 86400),
+        scopes=FEISHU_OAUTH_SCOPES,
+    )
+    log.info("feishu oauth success for principal %s via binding %s", principal_id, binding_id)
+    return HTMLResponse(SUCCESS_HTML)

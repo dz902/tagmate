@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +16,24 @@ from strands.models.bedrock import BedrockModel
 
 import store
 from context import InvocationContext, Scene
+
+_invocation_ctx: contextvars.ContextVar[InvocationContext] = contextvars.ContextVar('_invocation_ctx')
+
+
+def get_invocation_ctx() -> InvocationContext:
+    """工具函数调用此方法获取当前 InvocationContext。"""
+    return _invocation_ctx.get()
+
+
+class NeedAuthorization(Exception):
+    """工具发现用户未授权（或 token 过期且 refresh 失败）时抛出。"""
+
+    def __init__(self, connection: str, scopes: list[str], authorize_url: str) -> None:
+        self.connection = connection
+        self.scopes = scopes
+        self.authorize_url = authorize_url
+        super().__init__(f"Need authorization for {connection}")
+
 
 DEFAULT_MODEL = "us.anthropic.claude-sonnet-4-20250514-v1:0"
 DEFAULT_REGION = "us-east-1"
@@ -102,6 +121,7 @@ def run_invocation(ctx: InvocationContext, user_text: str) -> str:
 
     history: list[dict] = session["messages"]
     history_len = len(history)
+    _invocation_ctx.set(ctx)
     try:
         agent = Agent(
             model=BedrockModel(model_id=agent_def["model"] or DEFAULT_MODEL, region_name=DEFAULT_REGION),
@@ -119,6 +139,13 @@ def run_invocation(ctx: InvocationContext, user_text: str) -> str:
         store.update_session_messages(session["id"], agent.messages)
         store.finish_invocation(inv["id"], "completed", output_text=output)
         return output
+    except NeedAuthorization as na:
+        store.append_event(inv["id"], "need_auth", {
+            "connection": na.connection, "scopes": na.scopes, "authorize_url": na.authorize_url,
+        })
+        msg = f"需要授权 {na.connection} 后才能继续，请点击链接完成授权：\n{na.authorize_url}"
+        store.finish_invocation(inv["id"], "need_auth", output_text=msg)
+        return msg
     except Exception as e:
         store.append_event(inv["id"], "error", {"error": str(e), "type": type(e).__name__})
         store.finish_invocation(inv["id"], "failed", error=str(e))

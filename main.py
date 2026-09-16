@@ -13,8 +13,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import bridges
+import feishu_tools  # noqa: F401 -- 触发工具注册
 import store
 from api import router as api_router
+from api import oauth_router
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -30,6 +32,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TagMate", lifespan=lifespan)
 app.include_router(api_router)
+app.include_router(oauth_router)
 
 
 # --- 前端（frontend/ 经 vite build 产出到 static/）---
